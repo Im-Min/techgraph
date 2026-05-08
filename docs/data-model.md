@@ -10,6 +10,7 @@ TechGraph의 데이터 구조는 관계형 데이터베이스를 기본으로 �
 - 진척도는 사용자의 느낌이 아니라 검증된 마일스톤에서 계산합니다.
 - 상위 기술의 실현 가능성은 하위 선행 기술의 성숙도에 의해 제한됩니다.
 - “완성률”이라는 표현 대신 “실현 근접도” 또는 “Readiness Index”를 사용합니다.
+- 댓글, 편집 제안, 리뷰 이력은 원본 데이터와 분리해 감사 가능하게 저장합니다.
 
 ## 2. 핵심 엔티티
 
@@ -120,6 +121,84 @@ TechGraph의 데이터 구조는 관계형 데이터베이스를 기본으로 �
 | `userId` | UUID nullable | 사용자 ID |
 | `createdAt` | datetime | 생성일 |
 
+
+### 2.8 User
+
+커뮤니티 기능을 위한 사용자 엔티티입니다.
+
+| 필드 | 타입 | 설명 |
+| --- | --- | --- |
+| `id` | UUID | 사용자 ID |
+| `displayName` | string | 표시 이름 |
+| `role` | enum | `member`, `trusted_contributor`, `reviewer`, `admin` |
+| `reputationScore` | integer | 승인된 기여 기반 평판 점수 |
+| `createdAt` | datetime | 가입일 |
+| `updatedAt` | datetime | 수정일 |
+
+### 2.9 Comment
+
+기술 상세 페이지와 마일스톤에 달리는 댓글입니다. 댓글은 토론과 자료 제안을 위한 영역이며, TRL 또는 Readiness Index를 직접 변경하지 않습니다.
+
+| 필드 | 타입 | 설명 |
+| --- | --- | --- |
+| `id` | UUID | 댓글 ID |
+| `technologyId` | UUID nullable | 대상 기술 |
+| `milestoneId` | UUID nullable | 대상 마일스톤 |
+| `parentCommentId` | UUID nullable | 대댓글 대상 댓글 |
+| `authorId` | UUID | 작성자 |
+| `body` | text | 댓글 내용 |
+| `status` | enum | `visible`, `hidden`, `flagged`, `deleted` |
+| `createdAt` | datetime | 생성일 |
+| `updatedAt` | datetime | 수정일 |
+
+### 2.10 EditProposal
+
+사용자가 기술 정보를 직접 수정 제안할 때 사용하는 엔티티입니다. 승인 전까지는 실제 기술 데이터에 반영하지 않습니다.
+
+| 필드 | 타입 | 설명 |
+| --- | --- | --- |
+| `id` | UUID | 편집 제안 ID |
+| `technologyId` | UUID | 대상 기술 |
+| `authorId` | UUID | 제안 작성자 |
+| `proposalType` | enum | `description`, `classification`, `trl`, `dependency`, `milestone`, `reference` |
+| `title` | string | 제안 제목 |
+| `summary` | text | 변경 요약 |
+| `patch` | json | 변경 전후 diff 또는 구조화된 패치 |
+| `evidenceUrls` | json | 근거 URL 목록 |
+| `status` | enum | `draft`, `submitted`, `needs_changes`, `approved`, `rejected`, `superseded` |
+| `reviewerId` | UUID nullable | 최종 리뷰어 |
+| `reviewNotes` | text nullable | 리뷰 메모 |
+| `createdAt` | datetime | 생성일 |
+| `updatedAt` | datetime | 수정일 |
+
+### 2.11 Revision
+
+승인된 편집이 실제 데이터에 반영된 기록입니다. 모든 주요 필드는 되돌릴 수 있도록 revision으로 남깁니다.
+
+| 필드 | 타입 | 설명 |
+| --- | --- | --- |
+| `id` | UUID | 리비전 ID |
+| `technologyId` | UUID | 대상 기술 |
+| `editProposalId` | UUID nullable | 원인이 된 편집 제안 |
+| `authorId` | UUID | 변경 작성자 또는 적용자 |
+| `changedFields` | json | 변경된 필드 목록 |
+| `beforeSnapshot` | json | 변경 전 스냅샷 |
+| `afterSnapshot` | json | 변경 후 스냅샷 |
+| `createdAt` | datetime | 생성일 |
+
+### 2.12 VoteReaction
+
+댓글, 편집 제안, 예측, 마일스톤에 대한 커뮤니티 반응입니다.
+
+| 필드 | 타입 | 설명 |
+| --- | --- | --- |
+| `id` | UUID | 반응 ID |
+| `targetType` | enum | `comment`, `edit_proposal`, `milestone`, `forecast` |
+| `targetId` | UUID | 대상 ID |
+| `userId` | UUID | 반응 사용자 |
+| `reaction` | enum | `upvote`, `downvote`, `source_needed`, `high_quality_source`, `spam` |
+| `createdAt` | datetime | 생성일 |
+
 ## 3. Readiness Index 계산
 
 ### 3.1 목적
@@ -208,7 +287,49 @@ currentTrl = max(verifiedMilestones.verifiedTrl)
 4. 검토자는 `verified`, `rejected`, `needs_more_evidence` 중 하나로 상태를 변경합니다.
 5. `verified` 상태만 Readiness Index와 current TRL 계산에 반영합니다.
 
-## 6. 권장 관계형 스키마 초안
+
+## 6. 사용자 편집 및 댓글 운영 워크플로
+
+### 6.1 댓글 운영
+
+1. 사용자가 기술 상세 페이지 또는 마일스톤에 댓글을 작성합니다.
+2. 댓글은 즉시 공개하되, 스팸·욕설·무근거 반복 주장 신고가 누적되면 `flagged` 상태가 됩니다.
+3. 신고된 댓글은 리뷰어가 `visible`, `hidden`, `deleted` 중 하나로 처리합니다.
+4. 댓글에 포함된 근거 자료가 의미 있으면 작성자 또는 다른 사용자가 `EditProposal` 또는 `Milestone`으로 승격해 제출할 수 있습니다.
+
+### 6.2 사용자 편집 제안
+
+1. 가입 사용자가 기술 페이지에서 “수정 제안”을 선택합니다.
+2. 사용자는 변경 유형, 변경 요약, 구조화된 patch, 근거 URL을 입력합니다.
+3. 제출된 제안은 `submitted` 상태로 공개 리뷰 큐에 들어갑니다.
+4. 리뷰어 또는 신뢰 사용자가 근거 품질, 중복 여부, 분류 기준 적합성을 검토합니다.
+5. 승인 시 대상 데이터가 갱신되고 `Revision`이 생성됩니다.
+6. 반려 또는 보완 요청 시 사유를 남겨 작성자가 재제출할 수 있게 합니다.
+
+### 6.3 충돌 처리
+
+같은 기술에 대해 여러 편집 제안이 동시에 제출될 수 있습니다. 이 경우 다음 기준으로 병합합니다.
+
+- 서로 다른 필드를 수정하면 병렬 승인할 수 있습니다.
+- 같은 필드를 수정하면 리뷰어가 하나를 승인하고 나머지는 `superseded`로 표시합니다.
+- TRL, Tier, critical dependency처럼 영향이 큰 변경은 최소 1명의 리뷰어 승인을 요구합니다.
+- 관리자는 기준 변경 또는 악의적 편집 발생 시 이전 `Revision`으로 롤백할 수 있습니다.
+
+### 6.4 평판 점수 반영
+
+사용자의 평판은 다음 이벤트로 변경됩니다.
+
+| 이벤트 | 점수 영향 |
+| --- | --- |
+| 편집 제안 승인 | 증가 |
+| 검증된 마일스톤 제출 | 크게 증가 |
+| 고품질 출처 반응 획득 | 증가 |
+| 승인된 편집이 이후 롤백됨 | 감소 |
+| 스팸 또는 허위 정보로 신고 확정 | 크게 감소 |
+
+평판은 리뷰 큐 정렬과 낮은 위험도 수정의 빠른 승인에만 사용하며, 핵심 지표 변경 권한을 자동 부여하지 않습니다.
+
+## 7. 권장 관계형 스키마 초안
 
 ```sql
 CREATE TABLE technology_domains (
@@ -272,9 +393,68 @@ CREATE TABLE forecasts (
   user_id UUID,
   created_at TIMESTAMPTZ NOT NULL
 );
+
+CREATE TABLE users (
+  id UUID PRIMARY KEY,
+  display_name TEXT NOT NULL,
+  role TEXT NOT NULL CHECK (role IN ('member', 'trusted_contributor', 'reviewer', 'admin')),
+  reputation_score INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE comments (
+  id UUID PRIMARY KEY,
+  technology_id UUID REFERENCES technologies(id),
+  milestone_id UUID REFERENCES milestones(id),
+  parent_comment_id UUID REFERENCES comments(id),
+  author_id UUID NOT NULL REFERENCES users(id),
+  body TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('visible', 'hidden', 'flagged', 'deleted')),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  CHECK (technology_id IS NOT NULL OR milestone_id IS NOT NULL)
+);
+
+CREATE TABLE edit_proposals (
+  id UUID PRIMARY KEY,
+  technology_id UUID NOT NULL REFERENCES technologies(id),
+  author_id UUID NOT NULL REFERENCES users(id),
+  proposal_type TEXT NOT NULL CHECK (proposal_type IN ('description', 'classification', 'trl', 'dependency', 'milestone', 'reference')),
+  title TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  patch JSONB NOT NULL,
+  evidence_urls JSONB NOT NULL DEFAULT '[]'::jsonb,
+  status TEXT NOT NULL CHECK (status IN ('draft', 'submitted', 'needs_changes', 'approved', 'rejected', 'superseded')),
+  reviewer_id UUID REFERENCES users(id),
+  review_notes TEXT,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE revisions (
+  id UUID PRIMARY KEY,
+  technology_id UUID NOT NULL REFERENCES technologies(id),
+  edit_proposal_id UUID REFERENCES edit_proposals(id),
+  author_id UUID NOT NULL REFERENCES users(id),
+  changed_fields JSONB NOT NULL,
+  before_snapshot JSONB NOT NULL,
+  after_snapshot JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE vote_reactions (
+  id UUID PRIMARY KEY,
+  target_type TEXT NOT NULL CHECK (target_type IN ('comment', 'edit_proposal', 'milestone', 'forecast')),
+  target_id UUID NOT NULL,
+  user_id UUID NOT NULL REFERENCES users(id),
+  reaction TEXT NOT NULL CHECK (reaction IN ('upvote', 'downvote', 'source_needed', 'high_quality_source', 'spam')),
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE(target_type, target_id, user_id, reaction)
+);
 ```
 
-## 7. 초기 샘플 데이터 후보
+## 8. 초기 샘플 데이터 후보
 
 | 기술 | 도메인 | Tier | 초기 TRL | 핵심 선행 기술 |
 | --- | --- | --- | --- | --- |
